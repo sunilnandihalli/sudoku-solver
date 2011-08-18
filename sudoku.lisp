@@ -1,0 +1,176 @@
+(require 'onlisp)
+(defgeneric loop-keyword-for (seq))
+(defmethod loop-keyword-for ((seq list)) 'in)
+(defmethod loop-keyword-for ((seq vector)) 'across)
+(defgeneric assign-val (seq))
+(defmethod assign-val ((seq t)) seq)
+(defmethod assign-val ((seq list)) (list (quote quote) seq))
+(defun map-permute (oper &rest seqs)
+  (progn 
+    (flet ((map-permute-creator (oper &rest args)
+	     (let* ((seq-symbol-pairs (mapcar (lambda (x) (list (gensym "permute-seqs") (assign-val x))) args))
+		    (itervar-symbol-keywords (mapcar (lambda (x) 
+						       (list (gensym "permute-iterator") (car x) (loop-keyword-for (cadr x)))) 
+						     seq-symbol-pairs))
+		    (tuple (mapcar (lambda (x) (car x)) itervar-symbol-keywords)))
+	       `(let ,seq-symbol-pairs
+		 ,(reduce (lambda (x y) 
+			    (let* ((var (car x)) 
+				   (seq (cadr x)) 
+				   (loop-keyword (caddr x)))
+			      (list 'loop 'for var loop-keyword seq  'collecting y)))  
+			  itervar-symbol-keywords
+			  :from-end t 
+			  :initial-value (list 'apply oper (cons 'list tuple)))))))
+      (eval (apply #'map-permute-creator (cons oper seqs))))))
+(defun mycross (A B)
+  (map 'list (lambda (x y) (format nil "~a~a" x y)) A B))
+(defparameter +rows+ "ABCDEFGHI")
+(defparameter +cols+ "123456789")
+(defparameter +digits+ "123456789")
+(defparameter +valid-vals+ ".-0123456789")
+(defparameter result nil)
+(defparameter +squares+ (onlisp:flatten (map-permute (lambda (x y) (format nil "~a~a" x y)) +rows+ +cols+)))
+(defparameter +unitlist+ (append (map-permute (lambda (x y) (format nil "~a~a" x y)) +rows+ +cols+)
+				 (map-permute (lambda (y x) (format nil "~a~a" x y)) +cols+ +rows+)
+				 (loop for rs in '("ABC" "DEF" "GHI")
+				       append (loop for cs in '("123" "456" "789")
+						    collecting (onlisp:flatten (map-permute (lambda (x y) 
+											      (format nil "~a~a" x y)) rs cs ))))))
+(defparameter +units+ 
+  (let ((units (make-hash-table :test 'equal)))
+    (loop for s in +squares+
+	  do (setf (gethash s units) 
+		   (loop for u in +unitlist+ 
+			 when (find s u :test #'equal) 
+			 collect u)))
+    units))
+(defparameter +peers+
+  (let ((peers (make-hash-table :test 'equal)))
+    (loop for s in +squares+
+	  do (setf (gethash s peers)
+		   (let ((tmp '()))
+		     (loop for u in (gethash s +units+)
+			   do (setf tmp (union tmp (loop for s2 in u 
+							 when (not (equal s2 s))
+							 collecting s2) :test #'equal)))
+		     tmp)))
+    peers))
+(defun all (l)
+  (and l (reduce (lambda (a b) (and a b)) l)))
+(defun mysome (l)
+  (loop for i in l when i do (return i)))
+(defun copy-hash (table)
+  (let ((table-copy ( make-hash-table :test 'equal)))
+    (maphash (lambda (k v) (setf (gethash k table-copy) v)) table)
+    table-copy))
+(defun mysearch (values)
+  (cond 
+    ((eq values nil) nil)
+    ((all (loop for s in +squares+ 
+		collect (equalp (length (gethash s  values)) 1))) values)
+    (t (let ((s nil) (l 10)) 
+	 (maphash (lambda (k v) (let ((tmpl (length v)))
+				  (if (and (> tmpl 1) (> l tmpl)) (setf s k l tmpl)))) values)
+	 (loop for d across (gethash s values) 
+	       do (let ((result (mysearch (assign (copy-hash values) s d))))
+		    (if result (return-from mysearch result))))))))
+;(defun assign (values s d) 
+;  (if (all (loop 
+;	       for d2 across (gethash s values)
+;	       when (not (equalp d2 d)) 
+;	       collecting (eliminate values s d2)))
+;      values nil))
+(defun assign (values s d)
+  (if (find d (gethash s values))
+      (loop for d2 across (gethash s values)
+	    when (not (equalp d2 d))
+	    do (eliminate values s d2)
+	    finally (return values))
+      nil))
+(defun eliminate (values s d)
+  (if (find d (gethash s values))
+      (progn
+	(setf (gethash s values) (remove d (gethash s values)))
+	(let ((values-length (length (gethash s values))))
+	  (cond 
+	    ((equalp values-length 0) (return-from eliminate nil))
+	    ((equalp values-length 1) 
+	     (let ((d2 (elt (gethash s values) 0)))
+	       (if (not (all (loop for s2 in (gethash s +peers+)
+				   collecting (eliminate values s2 d2))))
+		   (return-from eliminate nil))))))
+	(loop for u in (gethash s +units+)
+	      do (let* ((dplaces (loop for s in u 
+				       when (find d (gethash s values))
+				       collecting s)) 
+			(dplaces-len (length dplaces)))
+		   (cond 
+		     ((equalp dplaces-len 0) (return nil))
+		     ((equalp dplaces-len 1) (if (not (assign values (car dplaces) d))
+						 (return nil))))))
+	values)
+      values))
+(defun parse-grid (grid)
+  (let ((values ( make-hash-table :test 'equal)))
+    (setf result values)
+    (mapcar (lambda (s) (setf (gethash s values) (copy-seq +digits+))) 
+	    +squares+)    
+    (setf grid (loop for c across grid 
+		     when (find c +valid-vals+)
+		     collecting c))
+    (loop for s in +squares+ 
+	  for d in grid 
+	  do (if (and (find d +digits+) 
+		      (not (assign values s d)))
+		 (return-from parse-grid nil)))
+    (setf result values)
+    (values values)))
+(defun solve-file (filename)
+  (let ((results (loop for grid in 
+		       (with-open-file (inp filename) 
+			 (loop as line = (read-line inp nil nil) 
+			       while line collecting line)) collecting (let ((myresult (mysearch (parse-grid grid))))
+									 (displayPuzzle grid)
+									 (printboard myresult)
+									 myresult))))
+    (format t "## Got ~a out of ~a~%" 
+	    (loop for r in results 
+		  counting r into nresults 
+		  finally (return nresults)) 
+	    (length results))
+    (values results)))
+(defun center (width txt &key (out-stream t) (fill #\  ))
+  (let* ((l (length txt)) (diff (- width l)) (half (floor (/ diff 2))) (otherhalf (- diff half)))
+    (loop for i from 1 upto half do (format out-stream "~a" fill))
+    (format out-stream "~a" txt)
+    (loop for i from 1 upto otherhalf do (format out-stream "~a" fill))))
+
+(defun printboard (values)
+  (let ((width (+ 2 (loop for s in +squares+ 
+			  maximizing (length (gethash s values)) into max
+			  finally (return max)))))
+    (format t "~%")
+    (loop for r across +rows+
+	  do (progn 
+	       (loop for c across +cols+ 
+		     do (progn 
+			  (center width (gethash (format nil "~a~a" r c) values))
+			  (if (find c '(#\3 #\6)) (format t "|")))
+		     finally (format t "~%"))
+	       (if (find r '(#\C #\F)) 
+		   (progn
+		     (loop for i from 1 upto 11 
+			   do (if (find i  '(4 8)) 
+				  (format t "+") 
+				  (center width "" :fill #\-))
+			   finally (format t "~%"))))))))
+(defun displayBoard ()
+  (let ((tmpv (make-hash-table :test 'equalp)))
+    (mapcar (lambda (x) (setf (gethash x tmpv) x)) +squares+)
+    (printboard tmpv)))
+
+(defun displayPuzzle ( s )
+  (let ((tmpv (make-hash-table :test 'equalp)))
+    (map 'list (lambda (x y) (setf (gethash x tmpv) (format nil "~a" y))) +squares+ s)
+    (printboard tmpv)))
